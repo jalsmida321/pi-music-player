@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { Button, Input, Switch, message, Tag } from "antd";
 
-export default function SettingsView() {
+export default function SettingsView({ onDataChanged }) {
   const [cfg, setCfg] = useState({ baseUrl: "", apiKey: "", modelId: "" });
   const [settings, setSettings] = useState({ selfModify: true, acr: { accessKey: "", accessSecret: "" } });
   const [status, setStatus] = useState({ state: "idle", text: "" });
   const [testing, setTesting] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [appInfo, setAppInfo] = useState({ isPackaged: false, version: "" });
+  const [appInfo, setAppInfo] = useState({ isPackaged: false, version: "", deepLinkScheme: "pimusic://" });
+  const [backupBusy, setBackupBusy] = useState(false);
 
   useEffect(() => {
     window.api.app.info().then(setAppInfo);
@@ -50,6 +51,26 @@ export default function SettingsView() {
     const s = await window.api.settings.set(settings);
     setSettings(s);
     message.success("已保存（自我修改开关下次对话生效）");
+  };
+
+  const exportBackup = async () => {
+    setBackupBusy(true);
+    const result = await window.api.backup.export();
+    setBackupBusy(false);
+    if (result.ok) message.success(`已导出 ${result.tracks} 首歌曲信息和 ${result.playlists} 个歌单`);
+    else if (!result.canceled) message.error(result.error || "导出失败");
+  };
+
+  const importBackup = async () => {
+    setBackupBusy(true);
+    const result = await window.api.backup.import();
+    setBackupBusy(false);
+    if (result.ok) {
+      await onDataChanged?.();
+      message.success(`已导入 ${result.playlistsImported} 个歌单，本地匹配 ${result.playlistTracksMatched} 首`);
+    } else if (!result.canceled) {
+      message.error(result.error || "导入失败");
+    }
   };
 
   return (
@@ -99,6 +120,20 @@ export default function SettingsView() {
                 </span>
               </span>
             )}
+          </div>
+        </div>
+
+        <div className="set-card">
+          <h3>数据与迁移</h3>
+          <div className="desc">
+            导出歌单、喜欢状态、标签和必要设置。备份不会包含音乐文件、本机绝对路径、AI API Key、ACRCloud 凭据或聊天内容。导入时按歌曲名、艺人和时长匹配当前曲库，不删除现有数据。
+          </div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+            <Button type="primary" onClick={exportBackup} loading={backupBusy}>导出备份</Button>
+            <Button onClick={importBackup} disabled={backupBusy}>导入备份</Button>
+          </div>
+          <div className="hint">
+            外部工具可使用 <code>{appInfo.deepLinkScheme}open/library</code> 打开曲库，或使用 <code>{appInfo.deepLinkScheme}play/toggle</code> 控制播放。所有协议动作均经过白名单校验。
           </div>
         </div>
 

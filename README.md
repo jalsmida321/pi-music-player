@@ -20,7 +20,10 @@
 - ⬇️ **歌词自动下载**：播放时若没有 `.lrc`，自动获取同步歌词并写入歌曲同目录 + 本地缓存；数据源：**Lrclib.net（公版/CC 授权）→ 网易云兜底**（逆向接口，仅个人播放展示使用）；无同步歌词时降级显示纯文本
 - 🪟 **小窗模式**：迷你置顶播放窗（封面/进度/控制），可随时切回主窗口
 - 📂 **曲库管理**：自动解析标签（标题/艺人/专辑/风格/时长/封面），搜索，打标签
+- ◇ **唱片修复台**：集中检查缺失封面、歌词和异常元数据，支持逐首或批量补全；修复流程不改写原音频标签
 - 📑 **歌单**：手动建歌单，或让 AI 用一句话生成
+- 💾 **安全备份与迁移**：导出歌单、喜欢状态、标签和必要设置；不包含音频、本机路径、API Key 或聊天内容
+- 🔗 **Deep Link**：安装后支持 `pimusic://open/library`、`pimusic://open/repair` 和白名单播放控制
 - 🤖 **AI 助手（pi 大脑）**：
   - 按风格/年代/心情自动分桶建歌单
   - 重复歌曲检测
@@ -62,6 +65,7 @@ npm run dev
 ## 测试与打包
 
 ```bash
+npm test            # 备份脱敏、导入匹配和 Deep Link 白名单测试
 npm run build       # 前端生产构建
 npm run smoke       # Electron 集成冒烟测试
 npm run pack:win    # 生成未安装的 win-unpacked 目录
@@ -80,6 +84,8 @@ npm run dist:win    # 生成 NSIS 安装包（免安装 ZIP 由 release/win-unpa
 
 API Key 不会提交到源码仓库。只有在主动使用对应功能时，查询内容才会发往用户配置的大模型服务、歌词服务或 ACRCloud。卸载程序默认保留这些本地数据。
 
+设置页的备份文件不包含音乐文件、音乐目录绝对路径、AI/ACRCloud 凭据或聊天记录。修复台下载的歌词只写入应用缓存；正常播放时原有自动歌词流程仍可能在可写的歌曲目录旁创建同名 `.lrc`。
+
 ## 架构
 
 ```
@@ -91,7 +97,9 @@ electron/
 └── services/
     ├── store.mjs       # JSON 持久化（用户数据目录）
     ├── library.mjs     # 曲库扫描 + music-metadata 标签解析 + 封面提取
-    ├── lyrics.mjs      # LRC 解析 + 本地加载 + 在线下载（Lrclib → 网易云兜底；缓存+写入歌曲目录）
+    ├── lyrics.mjs      # LRC 解析 + 本地加载 + 在线下载（Lrclib → 网易云兜底）
+    ├── backup.mjs      # 版本化备份、脱敏与本地歌曲匹配
+    ├── deeplink.mjs    # pimusic:// 协议白名单解析
     ├── server.mjs      # 本地音频流（支持 Range 拖动）+ 封面服务
     └── agent.mjs       # pi AgentSession + BYOK（models.json/auth.json）+ 5 个音乐工具
 src/                    # React 渲染端（曲库/歌单/AI 助手/设置 + 播放条）

@@ -1,6 +1,6 @@
 // Electron 主进程：窗口 + IPC + 各服务装配
 import { app, BrowserWindow, ipcMain, dialog, shell } from "electron";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Store } from "./services/store.mjs";
@@ -9,7 +9,8 @@ import { MediaServer } from "./services/server.mjs";
 import { AgentService } from "./services/agent.mjs";
 import { LyricsService } from "./services/lyrics.mjs";
 import { acrCloudIdentify } from "./services/hum.mjs";
-import { createHash } from "node:crypto";
+import { applyBackup, createBackup, validateBackup } from "./services/backup.mjs";
+import { findDeepLink, parseDeepLink } from "./services/deeplink.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 let win = null;
@@ -18,6 +19,7 @@ let lyricsWin = null;
 let store, library, mediaServer, agent, lyricsService;
 let latestPlayerState = null;
 let latestLyricsData = null;
+const pendingDeepLinks = [];
 const pendingConfirms = new Map();
 let confirmSeq = 0;
 
@@ -132,6 +134,28 @@ function broadcastAux() {
   }
 }
 
+function dispatchDeepLink(raw) {
+  const action = parseDeepLink(raw);
+  if (!action) return false;
+  if (!win || win.isDestroyed() || win.webContents.isLoadingMainFrame()) {
+    pendingDeepLinks.push(raw);
+    return true;
+  }
+  win.show();
+  win.focus();
+  if (action.type === "open") win.webContents.send("app:navigate", action.view);
+  if (action.type === "player") {
+    const type = action.action === "toggle" ? "playpause" : action.action === "previous" ? "prev" : "next";
+    win.webContents.send("player:cmd", { type });
+  }
+  return true;
+}
+
+function flushDeepLinks() {
+  const queued = pendingDeepLinks.splice(0);
+  for (const raw of queued) dispatchDeepLink(raw);
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1200,
@@ -214,6 +238,43 @@ function createWindow() {
           console.log("SMOKE_SETTINGS", JSON.stringify({ selfModify: st.selfModify, hasAcr: !!st.acr }));
         } catch (e) {
           console.log("SMOKE_SETTINGS_ERR", String(e).slice(0, 120));
+        }
+        // 备份脱敏、歌曲匹配与 Deep Link 白名单
+        try {
+          const sampleTrack = store.getTracks()[0] || {
+            id: "D:/private/Music/sample.mp3",
+            path: "D:/private/Music/sample.mp3",
+            title: "Sample",
+            artist: "Artist",
+            album: "Album",
+            duration: 180,
+            liked: true,
+            tags: ["夜晚"],
+          };
+          const backup = createBackup({
+            tracks: [sampleTrack],
+            playlists: [{ name: "测试歌单", trackIds: [sampleTrack.id] }],
+            settings: { acr: { accessSecret: "must-not-leak" }, chatSessionFile: "C:/private/chat.jsonl" },
+          }, app.getVersion());
+          const serialized = JSON.stringify(backup);
+          const restored = applyBackup(backup, { tracks: [sampleTrack], playlists: [], settings: { acr: { accessSecret: "keep" } } });
+          console.log("SMOKE_BACKUP", JSON.stringify({
+            privateDataExcluded: !serialized.includes(sampleTrack.path) && !serialized.includes("must-not-leak") && !serialized.includes("chat.jsonl"),
+            playlists: restored.summary.playlistsImported,
+            matched: restored.summary.playlistTracksMatched,
+            credentialPreserved: restored.settings.acr.accessSecret === "keep",
+          }));
+          console.log("SMOKE_DEEPLINK", JSON.stringify({
+            repair: parseDeepLink("pimusic://open/repair"),
+            next: parseDeepLink("pimusic://play/next"),
+            rejected: parseDeepLink("pimusic://evil/run") === null,
+          }));
+          dispatchDeepLink("pimusic://open/repair");
+          await new Promise((r) => setTimeout(r, 150));
+          const activeNav = await win.webContents.executeJavaScript(`document.querySelector('.nav-item.active')?.textContent.trim()`);
+          console.log("SMOKE_DEEPLINK_UI", JSON.stringify({ activeNav }));
+        } catch (e) {
+          console.log("SMOKE_BACKUP_ERR", String(e).slice(0, 160));
         }
         // 哼唱识别链路（假 key：验证请求能到达服务端并被处理）
         try {
@@ -337,6 +398,8 @@ function createWindow() {
 }
 
 function registerIpc() {
+  ipcMain.on("app:rendererReady", flushDeepLinks);
+
   // ---- 曲库 ----
   ipcMain.handle("library:scan", async (_e, onProgress) => {
     return library.scanAll();
@@ -367,6 +430,94 @@ function registerIpc() {
     if (t) t.liked = !t.liked;
     store.setTracks(tracks);
     return tracks;
+  });
+
+  // ---- 唱片修复台 ----
+  ipcMain.handle("repair:inspect", async () => {
+    const status = {};
+    for (const track of store.getTracks()) status[track.id] = lyricsService.inspectTrack(track);
+    return status;
+  });
+  ipcMain.handle("repair:track", async (_e, trackId) => {
+    const track = store.getTrack(trackId);
+    if (!track) return { ok: false, coverAdded: false, lyricsAdded: false, error: "歌曲不存在" };
+    const hadCover = !!track.coverId;
+    const hadLyrics = !["missing", "notfound"].includes(lyricsService.inspectTrack(track));
+    let hasCover = hadCover;
+    let hasLyrics = hadLyrics;
+    if (!hasCover) {
+      const coverResult = await library.fetchCover(track);
+      hasCover = !!coverResult.ok;
+    }
+    if (!hasLyrics) {
+      const lyricsResult = await lyricsService.getForTrack(track, { cacheOnly: true, force: true });
+      hasLyrics = lyricsResult.status !== "notfound" && lyricsResult.status !== "loading";
+      const tracks = store.getTracks();
+      const current = tracks.find((item) => item.id === trackId);
+      if (current) {
+        current.lyricsStatus = hasLyrics ? lyricsResult.status : "notfound";
+        current.lyricsCheckedAt = Date.now();
+        store.setTracks(tracks);
+      }
+    }
+    return {
+      ok: hasCover || hasLyrics,
+      coverAdded: !hadCover && hasCover,
+      lyricsAdded: !hadLyrics && hasLyrics,
+    };
+  });
+
+  // ---- 备份与迁移 ----
+  ipcMain.handle("backup:export", async () => {
+    const result = await dialog.showSaveDialog(win, {
+      title: "导出 PI Music Player 备份",
+      defaultPath: `PI-Music-Backup-${new Date().toISOString().slice(0, 10)}.pimusic.json`,
+      filters: [{ name: "PI Music Player 备份", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    const backup = createBackup({
+      tracks: store.getTracks(),
+      playlists: store.getPlaylists(),
+      settings: store.getSettings(),
+    }, app.getVersion());
+    writeFileSync(result.filePath, JSON.stringify(backup, null, 2), "utf-8");
+    return { ok: true, path: result.filePath, tracks: backup.library.length, playlists: backup.playlists.length };
+  });
+  ipcMain.handle("backup:import", async () => {
+    const result = await dialog.showOpenDialog(win, {
+      title: "导入 PI Music Player 备份",
+      properties: ["openFile"],
+      filters: [{ name: "PI Music Player 备份", extensions: ["json"] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+    const filePath = result.filePaths[0];
+    if (statSync(filePath).size > 50 * 1024 * 1024) return { ok: false, error: "备份文件超过 50 MB" };
+    let parsed;
+    try {
+      parsed = validateBackup(JSON.parse(readFileSync(filePath, "utf-8")));
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
+    }
+    const next = applyBackup(parsed, {
+      tracks: store.getTracks(),
+      playlists: store.getPlaylists(),
+      settings: store.getSettings(),
+    });
+    const confirmation = await dialog.showMessageBox(win, {
+      type: "question",
+      title: "确认导入备份",
+      message: `将导入 ${next.summary.playlistsImported} 个歌单`,
+      detail: `曲库匹配 ${next.summary.libraryMatched} 首，未匹配 ${next.summary.libraryMissing} 首。\n歌单歌曲匹配 ${next.summary.playlistTracksMatched} 首，缺少 ${next.summary.playlistTracksMissing} 首。\n\n现有数据不会被删除，API Key 和本机文件路径不会从备份导入。`,
+      buttons: ["取消", "确认导入"],
+      defaultId: 1,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirmation.response !== 1) return { ok: false, canceled: true };
+    store.setTracks(next.tracks);
+    store.savePlaylists(next.playlists);
+    store.setSettings(next.settings);
+    return { ok: true, ...next.summary };
   });
 
   // ---- 歌单 ----
@@ -443,7 +594,7 @@ function registerIpc() {
     }
     return store.getSettings();
   });
-  ipcMain.handle("app:info", async () => ({ isPackaged: app.isPackaged, version: app.getVersion() }));
+  ipcMain.handle("app:info", async () => ({ isPackaged: app.isPackaged, version: app.getVersion(), deepLinkScheme: "pimusic://" }));
   ipcMain.handle("app:restart", async () => {
     app.relaunch();
     app.exit(0);
@@ -553,40 +704,66 @@ function registerIpc() {
   });
 }
 
-app.whenReady().then(async () => {
-  // 冒烟测试用独立数据目录，避免污染真实用户数据
-  if (process.env.SMOKE_TEST) {
-    app.setPath("userData", join(app.getPath("temp"), "pi-music-smoke-" + Date.now()));
-  }
-  const userData = app.getPath("userData");
-  store = new Store(userData);
-  library = new Library(store, userData);
-  mediaServer = new MediaServer(library);
-  await mediaServer.start();
-  // 安装版代码位于只读 app.asar；仅开发环境允许 AI 修改源码
-  agent = new AgentService(store, library, userData, { projectRoot: app.isPackaged ? null : join(__dirname, "..") });
-  lyricsService = new LyricsService(userData);
-  agent.onConfirmRequest = (toolName, input) =>
-    new Promise((resolve) => {
-      const id = "c" + ++confirmSeq;
-      pendingConfirms.set(id, resolve);
-      if (win && !win.isDestroyed()) {
-        win.webContents.send("confirm:request", { id, toolName, input });
-      } else {
-        resolve(false);
-      }
-    });
-  agent.onEvent = (ev) => {
-    if (win && !win.isDestroyed()) win.webContents.send("agent:event", ev);
-  };
-  registerIpc();
-  createWindow();
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
-
-app.on("window-all-closed", () => {
+if (!gotSingleInstanceLock) {
   app.quit();
-});
+} else {
+  app.on("second-instance", (_event, argv) => {
+    const raw = findDeepLink(argv);
+    if (raw) dispatchDeepLink(raw);
+    else if (win && !win.isDestroyed()) {
+      win.show();
+      win.focus();
+    }
+  });
+  app.on("open-url", (event, raw) => {
+    event.preventDefault();
+    dispatchDeepLink(raw);
+  });
+
+  app.whenReady().then(async () => {
+    // 冒烟测试用独立数据目录，避免污染真实用户数据
+    if (process.env.SMOKE_TEST) {
+      app.setPath("userData", join(app.getPath("temp"), "pi-music-smoke-" + Date.now()));
+    }
+    if (!process.env.SMOKE_TEST) {
+      if (process.defaultApp) app.setAsDefaultProtocolClient("pimusic", process.execPath, [join(__dirname, "..")]);
+      else app.setAsDefaultProtocolClient("pimusic");
+    }
+    const startupDeepLink = findDeepLink(process.argv);
+    if (startupDeepLink) pendingDeepLinks.push(startupDeepLink);
+
+    const userData = app.getPath("userData");
+    store = new Store(userData);
+    library = new Library(store, userData);
+    mediaServer = new MediaServer(library);
+    await mediaServer.start();
+    // 安装版代码位于只读 app.asar；仅开发环境允许 AI 修改源码
+    agent = new AgentService(store, library, userData, { projectRoot: app.isPackaged ? null : join(__dirname, "..") });
+    lyricsService = new LyricsService(userData);
+    agent.onConfirmRequest = (toolName, input) =>
+      new Promise((resolve) => {
+        const id = "c" + ++confirmSeq;
+        pendingConfirms.set(id, resolve);
+        if (win && !win.isDestroyed()) {
+          win.webContents.send("confirm:request", { id, toolName, input });
+        } else {
+          resolve(false);
+        }
+      });
+    agent.onEvent = (ev) => {
+      if (win && !win.isDestroyed()) win.webContents.send("agent:event", ev);
+    };
+    registerIpc();
+    createWindow();
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on("window-all-closed", () => {
+    app.quit();
+  });
+}

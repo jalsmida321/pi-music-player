@@ -4,6 +4,7 @@ import LibraryView from "./components/LibraryView.jsx";
 import PlaylistView from "./components/PlaylistView.jsx";
 import ChatView from "./components/ChatView.jsx";
 import SettingsView from "./components/SettingsView.jsx";
+import RepairView from "./components/RepairView.jsx";
 import PlayerBar from "./components/PlayerBar.jsx";
 
 const fmt = (s) => {
@@ -46,6 +47,10 @@ export default function App() {
       setMiniOpen(!!s.mini);
       setLyricsOpen(!!s.lyrics);
     });
+    const disposeNavigate = window.api.app.onNavigate((nextView) => {
+      if (["library", "playlists", "repair", "chat", "settings"].includes(nextView)) setView(nextView);
+    });
+    return disposeNavigate;
   }, []);
 
   const playQueue = (list, index) => {
@@ -208,6 +213,8 @@ export default function App() {
             onRefresh={refresh}
           />
         );
+      case "repair":
+        return <RepairView tracks={tracks} port={port} onRefresh={refresh} />;
       case "chat":
         return (
           <ChatView
@@ -219,7 +226,7 @@ export default function App() {
           />
         );
       case "settings":
-        return <SettingsView />;
+        return <SettingsView onDataChanged={refresh} />;
       default:
         return null;
     }

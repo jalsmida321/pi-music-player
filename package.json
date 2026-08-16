@@ -12,6 +12,7 @@
     "dev": "concurrently -k \"vite\" \"wait-on tcp:127.0.0.1:5173 && electron .\"",
     "build": "vite build",
     "start": "electron .",
+    "test": "node --test electron/services/*.test.mjs",
     "smoke": "cross-env SMOKE_TEST=1 electron .",
     "pack:win": "npm run build && electron-builder --win dir",
     "dist:win": "npm run build && electron-builder --win nsis"
@@ -39,16 +40,21 @@
       "dist/**/*",
       "electron/**/*",
       "package.json",
-      "!electron/**/*.map"
+      "!electron/**/*.map",
+      "!electron/**/*.test.mjs"
     ],
     "extraMetadata": {
       "main": "electron/main.mjs"
     },
+    "protocols": [
+      {
+        "name": "PI Music Player Link",
+        "schemes": ["pimusic"]
+      }
+    ],
     "win": {
       "icon": "build/icon.ico",
-      "target": [
-        "nsis"
-      ]
+      "target": ["nsis"]
     },
     "nsis": {
       "artifactName": "${productName}-${version}-${arch}-Setup.${ext}",

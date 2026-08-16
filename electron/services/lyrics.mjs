@@ -1,5 +1,5 @@
 // LRC 歌词：解析 + 本地加载 + 在线自动下载（Lrclib.net）
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export function parseLrc(text) {
@@ -194,11 +194,30 @@ export class LyricsService {
     return join(this.cacheDir, this.hash(`${track.title}|${track.artist}`) + ".lrc");
   }
 
+  plainCachePath(track) {
+    return join(this.cacheDir, this.hash(`${track.title}|${track.artist}`) + ".txt");
+  }
+
+  inspectTrack(track) {
+    if (!track) return "missing";
+    try {
+      const localPath = String(track.path).replace(/\.[^.]+$/, ".lrc");
+      if (existsSync(localPath) && statSync(localPath).size > 0) return "local";
+      const syncedPath = this.cachePath(track);
+      if (existsSync(syncedPath) && statSync(syncedPath).size > 0) return "cache";
+      const plainPath = this.plainCachePath(track);
+      if (existsSync(plainPath) && statSync(plainPath).size > 0) return "cache";
+    } catch {
+      // 损坏或不可读按缺失处理
+    }
+    return track.lyricsStatus && track.lyricsStatus !== "notfound" ? track.lyricsStatus : "missing";
+  }
+
   /**
    * 获取歌词：本地 .lrc → 缓存 → Lrclib → 网易云兜底（下载并保存）
    * 返回 { lines?, plain?, status: "local"|"cache"|"online"|"notfound"|"loading" }
    */
-  async getForTrack(track) {
+  async getForTrack(track, options = {}) {
     if (!track) return { status: "notfound" };
     // 1) 本地 .lrc（歌曲同目录）
     const local = loadLrcForTrack(track.path);
@@ -210,11 +229,17 @@ export class LyricsService {
         const cached = parseLrc(readFileSync(cp, "utf-8"));
         if (cached.length > 0) return { lines: cached, status: "cache" };
       }
+      const plainPath = this.plainCachePath(track);
+      if (existsSync(plainPath)) {
+        const plain = readFileSync(plainPath, "utf-8").trim();
+        if (plain) return { plain, status: "cache" };
+      }
     } catch {
       // 缓存损坏忽略
     }
-    // 3) 在线获取（本会话已失败过则跳过）
+    // 3) 在线获取（本会话已失败过则跳过，修复台可主动重试）
     const key = `${track.title}|${track.artist}`;
+    if (options.force) this.negativeCache.delete(key);
     if (this.negativeCache.has(key)) return { status: "notfound" };
     let hit = null;
     try {
@@ -236,19 +261,25 @@ export class LyricsService {
     if (lrcText) {
       const lines = parseLrc(lrcText);
       if (lines.length > 0 && !isInstrumentalLines(lines)) {
-        this.persist(track, lrcText);
+        this.persist(track, lrcText, { cacheOnly: !!options.cacheOnly });
         return { lines, status: "online" };
       }
     }
     if (plain) {
+      try {
+        mkdirSync(this.cacheDir, { recursive: true });
+        writeFileSync(this.plainCachePath(track), plain, "utf-8");
+      } catch {
+        // 缓存写入失败不阻塞
+      }
       return { plain, status: "online" };
     }
     this.negativeCache.add(key);
     return { status: "notfound" };
   }
 
-  // 存缓存 + 写入歌曲同目录（只读目录静默跳过）
-  persist(track, lrcText) {
+  // 默认存缓存并写入歌曲同目录；修复台使用 cacheOnly，避免改动用户音乐目录
+  persist(track, lrcText, options = {}) {
     const cp = this.cachePath(track);
     try {
       mkdirSync(this.cacheDir, { recursive: true });
@@ -256,11 +287,13 @@ export class LyricsService {
     } catch {
       // 缓存写入失败不阻塞
     }
-    const lrcPath = String(track.path).replace(/\.[^.]+$/, ".lrc");
-    try {
-      writeFileSync(lrcPath, lrcText, "utf-8");
-    } catch {
-      // 目录不可写，忽略
+    if (!options.cacheOnly) {
+      const lrcPath = String(track.path).replace(/\.[^.]+$/, ".lrc");
+      try {
+        writeFileSync(lrcPath, lrcText, "utf-8");
+      } catch {
+        // 目录不可写，忽略
+      }
     }
   }
 }

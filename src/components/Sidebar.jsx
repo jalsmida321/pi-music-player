@@ -1,11 +1,12 @@
 import React from "react";
 
-const ICONS = { library: "♪", playlists: "▤", chat: "✦", settings: "⚙" };
+const ICONS = { library: "♪", playlists: "▤", repair: "◇", chat: "✦", settings: "⚙" };
 
 export default function Sidebar({ view, setView, folders, scanning, onAddFolder, onRemoveFolder, playlistCount }) {
   const navs = [
     { id: "library", label: "曲库" },
     { id: "playlists", label: "歌单" + (playlistCount ? ` ${playlistCount}` : "") },
+    { id: "repair", label: "唱片修复台" },
     { id: "chat", label: "AI 助手" },
     { id: "settings", label: "设置" },
   ];

@@ -31,6 +31,14 @@ contextBridge.exposeInMainWorld("api", {
   cover: {
     fetch: (track) => ipcRenderer.invoke("cover:fetch", track),
   },
+  repair: {
+    inspect: () => ipcRenderer.invoke("repair:inspect"),
+    track: (trackId) => ipcRenderer.invoke("repair:track", trackId),
+  },
+  backup: {
+    export: () => ipcRenderer.invoke("backup:export"),
+    import: () => ipcRenderer.invoke("backup:import"),
+  },
   settings: {
     get: () => ipcRenderer.invoke("settings:get"),
     set: (s) => ipcRenderer.invoke("settings:set", s),
@@ -39,6 +47,12 @@ contextBridge.exposeInMainWorld("api", {
     restart: () => ipcRenderer.invoke("app:restart"),
     openPath: (p) => ipcRenderer.invoke("app:openPath", p),
     info: () => ipcRenderer.invoke("app:info"),
+    onNavigate: (cb) => {
+      const handler = (_e, view) => cb(view);
+      ipcRenderer.on("app:navigate", handler);
+      ipcRenderer.send("app:rendererReady");
+      return () => ipcRenderer.removeListener("app:navigate", handler);
+    },
   },
   hum: {
     identify: (wavBuffer) => ipcRenderer.invoke("hum:identify", wavBuffer),
